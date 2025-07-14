@@ -100,10 +100,13 @@ export class OpenAIResponsesTransformer implements Transformer {
         // Handle tool calls
         if (message.tool_calls && message.tool_calls.length > 0) {
           message.tool_calls.forEach((toolCall) => {
-            // 新しいIDを生成してマッピングを保存
-            const newCallId = `call_${Math.random()
-              .toString(36)
-              .substring(2, 15)}`;
+            // OpenAI Responses APIは fc_ プレフィックスを要求
+            // Claudeのフォーマットに合わせて長いIDを生成
+            const randomPart = Array.from(
+              { length: 32 },
+              () => Math.random().toString(36).charAt(2) || "0"
+            ).join("");
+            const newCallId = `fc_${randomPart}`;
             this.toolCallIdMap.set(toolCall.id, newCallId);
 
             inputItems.push({
