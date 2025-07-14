@@ -81,13 +81,31 @@ export class OpenAIResponsesTransformer implements Transformer {
 
     // Handle tools
     if (request.tools && request.tools.length > 0) {
-      body.tools = request.tools.map((tool) => ({
-        type: "function",
-        name: tool.function.name,
-        description: tool.function.description,
-        parameters: tool.function.parameters,
-        strict: true,
-      }));
+      body.tools = request.tools.map((tool) => {
+        const parameters = tool.function.parameters;
+
+        // すべてのプロパティキーを required に含める
+        if (parameters && parameters.properties) {
+          const allPropertyKeys = Object.keys(parameters.properties);
+          if (!parameters.required) {
+            parameters.required = allPropertyKeys;
+          } else {
+            // 既存の required 配列に不足しているキーを追加
+            const missingKeys = allPropertyKeys.filter(
+              (key) => !parameters.required.includes(key)
+            );
+            parameters.required = [...parameters.required, ...missingKeys];
+          }
+        }
+
+        return {
+          type: "function",
+          name: tool.function.name,
+          description: tool.function.description,
+          parameters: parameters,
+          strict: true,
+        };
+      });
     }
 
     // Handle tool_choice
