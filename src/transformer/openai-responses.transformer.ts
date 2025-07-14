@@ -1,465 +1,596 @@
-import { UnifiedChatRequest, UnifiedMessage, UnifiedTool } from "@/types/llm";
-import { Transformer } from "@/types/transformer";
-import { log } from "@/utils/log";
+import { log } from "../utils/log";
+import {
+  LLMProvider,
+  UnifiedChatRequest,
+  UnifiedMessage,
+  UnifiedTool,
+} from "@/types/llm";
+import { Transformer } from "../types/transformer";
 
 export class OpenAIResponsesTransformer implements Transformer {
   name = "OpenAIResponses";
+
   endPoint = "/v1/responses";
 
-  // Transform unified request to OpenAI Responses API format
-  transformRequestOut(request: Record<string, any>): UnifiedChatRequest {
-    log("OpenAI Responses Request:", JSON.stringify(request, null, 2));
+  transformRequestIn(
+    request: UnifiedChatRequest,
+    provider: LLMProvider
+  ): Record<string, any> {
+    // Convert UnifiedChatRequest to OpenAI Responses API format
+    const inputItems: any[] = [];
 
-    const messages: UnifiedMessage[] = [];
-
-    // Handle instructions (system message)
-    if (request.instructions) {
-      messages.push({
-        role: "system",
-        content: request.instructions,
-      });
-    }
-
-    // Convert input items to unified messages
-    if (request.input) {
-      if (typeof request.input === "string") {
-        messages.push({
-          role: "user",
-          content: request.input,
+    // Process messages into input items
+    request.messages.forEach((message) => {
+      if (message.role === "system" || message.role === "user") {
+        const content = this.convertMessageContent(message);
+        inputItems.push({
+          type: "message",
+          role: message.role === "system" ? "developer" : message.role,
+          content: content,
         });
-      } else if (Array.isArray(request.input)) {
-        request.input.forEach((item: any) => {
-          if (item.type === "message") {
-            messages.push({
-              role: item.role || "user",
-              content: this.convertContentToUnified(item.content),
+      } else if (message.role === "assistant") {
+        // Assistant messages with content
+        if (message.content) {
+          const content = this.convertMessageContent(message);
+          inputItems.push({
+            type: "message",
+            role: "assistant",
+            content: content,
+          });
+        }
+
+        // Handle tool calls
+        if (message.tool_calls && message.tool_calls.length > 0) {
+          message.tool_calls.forEach((toolCall) => {
+            inputItems.push({
+              type: "function_call",
+              id: toolCall.id,
+              call_id: toolCall.id,
+              name: toolCall.function.name,
+              arguments: toolCall.function.arguments,
             });
-          } else if (item.type === "function_call") {
-            messages.push({
-              role: "assistant",
-              content: null,
-              tool_calls: [
-                {
-                  id: item.call_id,
-                  type: "function",
-                  function: {
-                    name: item.name,
-                    arguments: item.arguments,
-                  },
-                },
-              ],
-            });
-          } else if (item.type === "function_call_output") {
-            messages.push({
-              role: "tool",
-              content: item.output,
-              tool_call_id: item.call_id,
-            });
-          }
+          });
+        }
+      } else if (message.role === "tool") {
+        // Tool results
+        inputItems.push({
+          type: "function_call_output",
+          call_id: message.tool_call_id,
+          output:
+            typeof message.content === "string"
+              ? message.content
+              : JSON.stringify(message.content),
         });
       }
-    }
+    });
 
-    const result: UnifiedChatRequest = {
-      messages,
+    // Build the request body
+    const body: any = {
+      input: inputItems,
       model: request.model,
-      max_tokens: request.max_output_tokens,
-      temperature: request.temperature,
-      stream: request.stream,
-      tools: request.tools
-        ? this.convertToolsToUnified(request.tools)
-        : undefined,
-      tool_choice: this.convertToolChoice(request.tool_choice),
+      stream: request.stream || false,
     };
 
-    log(
-      "Transformed OpenAI Responses Request hogehoge:",
-      JSON.stringify(result, null, 2)
-    );
+    // Add optional parameters
+    if (request.temperature !== undefined) {
+      body.temperature = request.temperature;
+    }
+    if (request.max_tokens !== undefined) {
+      body.max_output_tokens = request.max_tokens;
+    }
 
-    return result;
-  }
+    // Handle tools
+    if (request.tools && request.tools.length > 0) {
+      body.tools = request.tools.map((tool) => ({
+        type: "function",
+        name: tool.function.name,
+        description: tool.function.description,
+        parameters: tool.function.parameters,
+        strict: true,
+      }));
+    }
 
-  // Transform response from OpenAI Responses API to unified format
-  async transformResponseIn(response: Response): Promise<Response> {
-    const isStream = response.headers
-      .get("Content-Type")
-      ?.includes("text/event-stream");
-
-    if (isStream) {
-      if (!response.body) {
-        throw new Error("Stream response body is null");
+    // Handle tool_choice
+    if (request.tool_choice) {
+      if (
+        request.tool_choice === "auto" ||
+        request.tool_choice === "none" ||
+        request.tool_choice === "required"
+      ) {
+        body.tool_choice = request.tool_choice;
+      } else {
+        // Specific function
+        body.tool_choice = {
+          type: "function",
+          name: request.tool_choice,
+        };
       }
-      const convertedStream = await this.convertResponsesStreamToUnified(
-        response.body
-      );
-      return new Response(convertedStream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
-    } else {
-      const data = await response.json();
-      const unifiedResponse = this.convertResponsesToUnified(data);
-      return new Response(JSON.stringify(unifiedResponse), {
-        headers: { "Content-Type": "application/json" },
-      });
     }
+
+    return {
+      body,
+      config: {
+        headers: {
+          Authorization: `Bearer ${provider.apiKey}`,
+        },
+      },
+    };
   }
 
-  private convertContentToUnified(content: any): string | null | any[] {
-    if (typeof content === "string") {
-      return content;
-    }
-    if (Array.isArray(content)) {
-      return content.map((item) => {
-        if (item.type === "input_text") {
-          return { type: "text", text: item.text };
-        } else if (item.type === "input_image") {
+  private convertMessageContent(message: UnifiedMessage): string | any[] {
+    if (typeof message.content === "string") {
+      return message.content;
+    } else if (Array.isArray(message.content)) {
+      return message.content.map((item) => {
+        if (item.type === "text") {
           return {
-            type: "image",
-            image_url: {
-              url: item.image_url || item.file_id,
-              detail: item.detail || "auto",
-            },
+            type: "input_text",
+            text: item.text,
+          };
+        } else if (item.type === "image") {
+          return {
+            type: "input_image",
+            image_url: item.image_url,
           };
         }
         return item;
       });
     }
-    return null;
+    return "";
   }
 
-  private convertToolsToUnified(tools: any[]): UnifiedTool[] {
-    return tools
-      .filter((tool) => tool.type === "function")
-      .map((tool) => ({
-        type: "function",
-        function: {
-          name: tool.name,
-          description: tool.description || "",
-          parameters: tool.parameters || {},
-        },
-      }));
-  }
+  transformRequestOut(request: Record<string, any>): UnifiedChatRequest {
+    const messages: UnifiedMessage[] = [];
 
-  private convertToolChoice(toolChoice: any): any {
-    if (!toolChoice) return undefined;
-    if (typeof toolChoice === "string") {
-      return toolChoice;
-    }
-    if (toolChoice.type === "function") {
-      return toolChoice.name;
-    }
-    return "auto";
-  }
-
-  // Convert Responses API stream to unified stream format
-  private async convertResponsesStreamToUnified(
-    responsesStream: ReadableStream
-  ): Promise<ReadableStream> {
-    const readable = new ReadableStream({
-      async start(controller) {
-        const encoder = new TextEncoder();
-        const decoder = new TextDecoder();
-        let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-
-        // State tracking
-        let currentMessage: any = null;
-        let currentToolCalls: Map<string, any> = new Map();
-        let accumulatedText = "";
-        let accumulatedToolArgs: Map<string, string> = new Map();
-        let hasStarted = false;
-        let messageId = "";
-        let model = "";
-        let chunkId = 0;
-
-        const createChunk = (delta: any, finishReason?: string) => {
-          return {
-            id: messageId || `chatcmpl-${Date.now()}`,
-            object: "chat.completion.chunk",
-            created: Math.floor(Date.now() / 1000),
-            model: model || "gpt-4",
-            choices: [
-              {
-                index: 0,
-                delta,
-                finish_reason: finishReason || null,
-              },
-            ],
-          };
-        };
-
-        try {
-          reader = responsesStream.getReader();
-          let buffer = "";
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-
-            for (const line of lines) {
-              if (!line.trim()) continue;
-
-              // Parse SSE format
-              if (line.startsWith("event: ")) {
-                const eventType = line.slice(7).trim();
-                continue; // Event type will be used with next data line
-              }
-
-              if (!line.startsWith("data: ")) continue;
-              const data = line.slice(6);
-
-              try {
-                const event = JSON.parse(data);
-                log("Responses API Event:", event.type, event);
-
-                switch (event.type) {
-                  case "response.created":
-                    messageId = event.response.id;
-                    model = event.response.model;
-                    if (!hasStarted) {
-                      hasStarted = true;
-                      // Send initial chunk
-                      const chunk = createChunk({
-                        role: "assistant",
-                        content: "",
-                      });
-                      controller.enqueue(
-                        encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
-                      );
-                    }
-                    break;
-
-                  case "response.output_item.added":
-                    if (event.item.type === "message") {
-                      // Message item added
-                      currentMessage = event.item;
-                    } else if (event.item.type === "function_call") {
-                      // Function call added
-                      const toolCall = {
-                        id: event.item.call_id,
-                        type: "function",
-                        function: {
-                          name: event.item.name,
-                          arguments: "",
-                        },
-                      };
-                      currentToolCalls.set(event.item.id, toolCall);
-                    }
-                    break;
-
-                  case "response.content_part.added":
-                    // Content part added (text or refusal)
-                    break;
-
-                  case "response.output_text.delta":
-                    // Text delta
-                    if (event.delta) {
-                      const chunk = createChunk({ content: event.delta });
-                      controller.enqueue(
-                        encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
-                      );
-                    }
-                    break;
-
-                  case "response.function_call_arguments.delta":
-                    // Function arguments delta
-                    if (event.delta && event.item_id) {
-                      const existingArgs =
-                        accumulatedToolArgs.get(event.item_id) || "";
-                      accumulatedToolArgs.set(
-                        event.item_id,
-                        existingArgs + event.delta
-                      );
-
-                      const toolCall = currentToolCalls.get(event.item_id);
-                      if (toolCall) {
-                        const chunk = createChunk({
-                          tool_calls: [
-                            {
-                              index: 0,
-                              id: toolCall.id,
-                              type: "function",
-                              function: {
-                                name: toolCall.function.name,
-                                arguments: event.delta,
-                              },
-                            },
-                          ],
-                        });
-                        controller.enqueue(
-                          encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
-                        );
-                      }
-                    }
-                    break;
-
-                  case "response.output_text.done":
-                    // Text completed
-                    accumulatedText = event.text || "";
-                    break;
-
-                  case "response.function_call_arguments.done":
-                    // Function arguments completed
-                    if (event.item_id) {
-                      const toolCall = currentToolCalls.get(event.item_id);
-                      if (toolCall) {
-                        toolCall.function.arguments = event.arguments;
-                      }
-                    }
-                    break;
-
-                  case "response.output_item.done":
-                    // Output item completed
-                    break;
-
-                  case "response.completed":
-                    // Response completed
-                    const finishChunk = createChunk({}, "stop");
-                    controller.enqueue(
-                      encoder.encode(`data: ${JSON.stringify(finishChunk)}\n\n`)
-                    );
-                    controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                    break;
-
-                  case "response.failed":
-                    // Handle error
-                    const errorChunk = createChunk({}, "stop");
-                    controller.enqueue(
-                      encoder.encode(`data: ${JSON.stringify(errorChunk)}\n\n`)
-                    );
-                    controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                    break;
-
-                  // Tool-specific events
-                  case "response.file_search_call.in_progress":
-                  case "response.file_search_call.searching":
-                  case "response.file_search_call.completed":
-                  case "response.web_search_call.in_progress":
-                  case "response.web_search_call.searching":
-                  case "response.web_search_call.completed":
-                    // Handle tool progress events if needed
-                    log(`Tool event: ${event.type}`);
-                    break;
-
-                  default:
-                    log(`Unhandled event type: ${event.type}`);
-                }
-
-                chunkId++;
-              } catch (parseError) {
-                log("Parse error:", parseError);
-              }
-            }
-          }
-        } catch (error) {
-          log("Stream processing error:", error);
-          controller.error(error);
-        } finally {
-          if (reader) {
-            try {
-              reader.releaseLock();
-            } catch (e) {
-              log("Error releasing reader lock:", e);
-            }
-          }
-          controller.close();
-        }
-      },
-    });
-
-    return readable;
-  }
-
-  // Convert non-streaming response
-  private convertResponsesToUnified(responsesData: any): any {
-    log(
-      "Original Responses API response:",
-      JSON.stringify(responsesData, null, 2)
-    );
-
-    const messages: any[] = [];
-    let content = "";
-    const toolCalls: any[] = [];
-
-    // Process output items
-    if (responsesData.output && Array.isArray(responsesData.output)) {
-      responsesData.output.forEach((item: any) => {
+    if (request.input && Array.isArray(request.input)) {
+      request.input.forEach((item: any) => {
         if (item.type === "message") {
-          // Process message content
-          if (item.content && Array.isArray(item.content)) {
-            item.content.forEach((contentItem: any) => {
-              if (contentItem.type === "output_text") {
-                content += contentItem.text;
-              } else if (contentItem.type === "refusal") {
-                content += `[Refusal: ${contentItem.refusal}]`;
-              }
-            });
-          }
+          const content = this.convertResponseContent(item.content);
+          messages.push({
+            role: item.role === "developer" ? "system" : item.role,
+            content: content,
+          });
         } else if (item.type === "function_call") {
-          toolCalls.push({
-            id: item.call_id || item.id,
+          // Find or create the last assistant message
+          let lastAssistant = messages[messages.length - 1];
+          if (!lastAssistant || lastAssistant.role !== "assistant") {
+            lastAssistant = {
+              role: "assistant",
+              content: null,
+              tool_calls: [],
+            };
+            messages.push(lastAssistant);
+          }
+
+          if (!lastAssistant.tool_calls) {
+            lastAssistant.tool_calls = [];
+          }
+
+          lastAssistant.tool_calls.push({
+            id: item.id || item.call_id,
             type: "function",
             function: {
               name: item.name,
               arguments: item.arguments,
             },
           });
+        } else if (item.type === "function_call_output") {
+          messages.push({
+            role: "tool",
+            content: item.output,
+            tool_call_id: item.call_id,
+          });
         }
       });
     }
 
-    // Use output_text if available
-    if (responsesData.output_text) {
-      content = responsesData.output_text;
+    const result: UnifiedChatRequest = {
+      messages,
+      model: request.model,
+      stream: request.stream,
+    };
+
+    if (request.temperature !== undefined) {
+      result.temperature = request.temperature;
+    }
+    if (request.max_output_tokens !== undefined) {
+      result.max_tokens = request.max_output_tokens;
     }
 
-    const result = {
-      id: responsesData.id,
-      object: "chat.completion",
-      created: responsesData.created_at || Math.floor(Date.now() / 1000),
-      model: responsesData.model,
-      choices: [
+    // Convert tools
+    if (request.tools && Array.isArray(request.tools)) {
+      result.tools = request.tools.map((tool: any) => ({
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description || "",
+          parameters: tool.parameters,
+        },
+      }));
+    }
+
+    // Convert tool_choice
+    if (request.tool_choice) {
+      if (typeof request.tool_choice === "string") {
+        result.tool_choice = request.tool_choice;
+      } else if (request.tool_choice.type === "function") {
+        result.tool_choice = request.tool_choice.name;
+      }
+    }
+
+    return result;
+  }
+
+  private convertResponseContent(content: any): string | any[] {
+    if (typeof content === "string") {
+      return content;
+    } else if (Array.isArray(content)) {
+      const textParts: string[] = [];
+      const otherParts: any[] = [];
+
+      content.forEach((item) => {
+        if (item.type === "input_text" || item.type === "output_text") {
+          textParts.push(item.text);
+        } else if (item.type === "input_image") {
+          otherParts.push({
+            type: "image",
+            image_url: item.image_url,
+          });
+        }
+      });
+
+      if (otherParts.length === 0) {
+        return textParts.join("");
+      } else {
+        const result: any[] = [];
+        if (textParts.length > 0) {
+          result.push({ type: "text", text: textParts.join("") });
+        }
+        result.push(...otherParts);
+        return result;
+      }
+    }
+    return "";
+  }
+
+  async transformResponseOut(response: Response): Promise<Response> {
+    if (response.headers.get("Content-Type")?.includes("application/json")) {
+      // Handle non-streaming response
+      const jsonResponse = await response.json();
+
+      // Transform to Chat Completions format
+      const choices: any[] = [
         {
           index: 0,
           message: {
             role: "assistant",
-            content: content || null,
-            ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
+            content: null,
           },
-          finish_reason: this.mapFinishReason(responsesData.status),
+          finish_reason: null,
         },
-      ],
-      usage: responsesData.usage
-        ? {
-            prompt_tokens: responsesData.usage.input_tokens || 0,
-            completion_tokens: responsesData.usage.output_tokens || 0,
-            total_tokens: responsesData.usage.total_tokens || 0,
-          }
-        : undefined,
-    };
+      ];
 
-    log("Converted to unified format:", JSON.stringify(result, null, 2));
-    return result;
+      let hasContent = false;
+      const toolCalls: any[] = [];
+
+      if (jsonResponse.output && Array.isArray(jsonResponse.output)) {
+        jsonResponse.output.forEach((item: any) => {
+          if (item.type === "message" && item.role === "assistant") {
+            const content = this.extractTextFromContent(item.content);
+            if (content) {
+              choices[0].message.content = content;
+              hasContent = true;
+            }
+          } else if (item.type === "function_call") {
+            toolCalls.push({
+              id: item.id || item.call_id,
+              type: "function",
+              function: {
+                name: item.name,
+                arguments: item.arguments,
+              },
+            });
+          }
+        });
+      }
+
+      if (toolCalls.length > 0) {
+        choices[0].message.tool_calls = toolCalls;
+        if (!hasContent) {
+          choices[0].message.content = null;
+        }
+      }
+
+      // Set finish reason
+      if (jsonResponse.status === "completed") {
+        choices[0].finish_reason = toolCalls.length > 0 ? "tool_calls" : "stop";
+      } else if (jsonResponse.status === "failed") {
+        choices[0].finish_reason = "stop";
+      }
+
+      const transformedResponse = {
+        id: jsonResponse.id,
+        object: "chat.completion",
+        created: jsonResponse.created_at || Math.floor(Date.now() / 1000),
+        model: jsonResponse.model,
+        choices: choices,
+        usage: jsonResponse.usage
+          ? {
+              prompt_tokens: jsonResponse.usage.input_tokens,
+              completion_tokens: jsonResponse.usage.output_tokens,
+              total_tokens: jsonResponse.usage.total_tokens,
+            }
+          : undefined,
+      };
+
+      return new Response(JSON.stringify(transformedResponse), {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } else if (response.headers.get("Content-Type")?.includes("stream")) {
+      // Handle streaming response
+      if (!response.body) {
+        return response;
+      }
+
+      const decoder = new TextDecoder();
+      const encoder = new TextEncoder();
+
+      // State for tracking the current message being built
+      let currentContent = "";
+      let currentToolCalls: Map<string, any> = new Map();
+      let outputIndex = 0;
+      let contentIndex = 0;
+      let responseId = "";
+      let model = "";
+      let isFirstChunk = true;
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          const reader = response.body!.getReader();
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              const chunk = decoder.decode(value, { stream: true });
+              const lines = chunk.split("\n");
+
+              for (const line of lines) {
+                if (
+                  line.startsWith("data: ") &&
+                  line.trim() !== "data: [DONE]"
+                ) {
+                  try {
+                    const eventData = JSON.parse(line.slice(6));
+
+                    // Process different event types
+                    switch (eventData.type) {
+                      case "response.created":
+                        responseId = eventData.response.id;
+                        model = eventData.response.model;
+
+                        // Send initial chunk
+                        const initialChunk = {
+                          id: responseId,
+                          object: "chat.completion.chunk",
+                          created: eventData.response.created_at,
+                          model: model,
+                          choices: [
+                            {
+                              index: 0,
+                              delta: { role: "assistant", content: "" },
+                              finish_reason: null,
+                            },
+                          ],
+                        };
+                        controller.enqueue(
+                          encoder.encode(
+                            `data: ${JSON.stringify(initialChunk)}\n\n`
+                          )
+                        );
+                        isFirstChunk = false;
+                        break;
+
+                      case "response.output_item.added":
+                        outputIndex = eventData.output_index;
+                        break;
+
+                      case "response.content_part.added":
+                        contentIndex = eventData.content_index;
+                        break;
+
+                      case "response.output_text.delta":
+                      case "response.text.delta":
+                        if (eventData.delta) {
+                          currentContent += eventData.delta;
+                          const deltaChunk = {
+                            id: responseId,
+                            object: "chat.completion.chunk",
+                            created: Math.floor(Date.now() / 1000),
+                            model: model,
+                            choices: [
+                              {
+                                index: 0,
+                                delta: { content: eventData.delta },
+                                finish_reason: null,
+                              },
+                            ],
+                          };
+                          controller.enqueue(
+                            encoder.encode(
+                              `data: ${JSON.stringify(deltaChunk)}\n\n`
+                            )
+                          );
+                        }
+                        break;
+
+                      case "response.function_call_arguments.delta":
+                        if (eventData.item_id && eventData.delta) {
+                          let toolCall = currentToolCalls.get(
+                            eventData.item_id
+                          );
+                          if (!toolCall) {
+                            toolCall = {
+                              id: eventData.item_id,
+                              type: "function",
+                              function: {
+                                name: "",
+                                arguments: "",
+                              },
+                            };
+                            currentToolCalls.set(eventData.item_id, toolCall);
+
+                            // Send initial tool call chunk
+                            const toolCallChunk = {
+                              id: responseId,
+                              object: "chat.completion.chunk",
+                              created: Math.floor(Date.now() / 1000),
+                              model: model,
+                              choices: [
+                                {
+                                  index: currentToolCalls.size - 1,
+                                  delta: {
+                                    tool_calls: [
+                                      {
+                                        index: currentToolCalls.size - 1,
+                                        id: eventData.item_id,
+                                        type: "function",
+                                        function: {},
+                                      },
+                                    ],
+                                  },
+                                  finish_reason: null,
+                                },
+                              ],
+                            };
+                            controller.enqueue(
+                              encoder.encode(
+                                `data: ${JSON.stringify(toolCallChunk)}\n\n`
+                              )
+                            );
+                          }
+
+                          toolCall.function.arguments += eventData.delta;
+
+                          // Send arguments delta
+                          const argsDeltaChunk = {
+                            id: responseId,
+                            object: "chat.completion.chunk",
+                            created: Math.floor(Date.now() / 1000),
+                            model: model,
+                            choices: [
+                              {
+                                index: 0,
+                                delta: {
+                                  tool_calls: [
+                                    {
+                                      index: Array.from(
+                                        currentToolCalls.keys()
+                                      ).indexOf(eventData.item_id),
+                                      function: {
+                                        arguments: eventData.delta,
+                                      },
+                                    },
+                                  ],
+                                },
+                                finish_reason: null,
+                              },
+                            ],
+                          };
+                          controller.enqueue(
+                            encoder.encode(
+                              `data: ${JSON.stringify(argsDeltaChunk)}\n\n`
+                            )
+                          );
+                        }
+                        break;
+
+                      case "response.function_call_arguments.done":
+                        if (eventData.item_id) {
+                          const toolCall = currentToolCalls.get(
+                            eventData.item_id
+                          );
+                          if (toolCall && eventData.name) {
+                            toolCall.function.name = eventData.name;
+                          }
+                        }
+                        break;
+
+                      case "response.completed":
+                        // Send final chunk with finish reason
+                        const finalChunk = {
+                          id: responseId,
+                          object: "chat.completion.chunk",
+                          created: Math.floor(Date.now() / 1000),
+                          model: model,
+                          choices: [
+                            {
+                              index: 0,
+                              delta: {},
+                              finish_reason:
+                                currentToolCalls.size > 0
+                                  ? "tool_calls"
+                                  : "stop",
+                            },
+                          ],
+                        };
+                        controller.enqueue(
+                          encoder.encode(
+                            `data: ${JSON.stringify(finalChunk)}\n\n`
+                          )
+                        );
+                        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                        break;
+                    }
+                  } catch (e) {
+                    log("Error parsing Responses API event:", e);
+                  }
+                } else if (line.trim() === "data: [DONE]") {
+                  controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                }
+              }
+            }
+          } catch (error) {
+            controller.error(error);
+          } finally {
+            try {
+              reader.releaseLock();
+            } catch (e) {
+              console.error("Error releasing reader lock:", e);
+            }
+            controller.close();
+          }
+        },
+      });
+
+      return new Response(stream, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      });
+    }
+
+    return response;
   }
 
-  private mapFinishReason(status: string): string {
-    switch (status) {
-      case "completed":
-        return "stop";
-      case "incomplete":
-        return "length";
-      case "failed":
-        return "content_filter";
-      default:
-        return "stop";
+  private extractTextFromContent(content: any): string | null {
+    if (typeof content === "string") {
+      return content;
+    } else if (Array.isArray(content)) {
+      const textParts = content
+        .filter(
+          (item) => item.type === "output_text" || item.type === "input_text"
+        )
+        .map((item) => item.text);
+      return textParts.length > 0 ? textParts.join("") : null;
     }
+    return null;
   }
 }
