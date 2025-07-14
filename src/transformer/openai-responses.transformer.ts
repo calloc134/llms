@@ -313,7 +313,7 @@ export class OpenAIResponsesTransformer implements Transformer {
   async transformResponseOut(response: Response): Promise<Response> {
     if (response.headers.get("Content-Type")?.includes("application/json")) {
       // Handle non-streaming response
-      const jsonResponse = await response.json();
+      const jsonResponse = (await response.json()) as any;
 
       // Transform to Chat Completions format
       const choices: any[] = [
@@ -404,6 +404,7 @@ export class OpenAIResponsesTransformer implements Transformer {
       const stream = new ReadableStream({
         async start(controller) {
           const reader = response.body!.getReader();
+          let buffer = ""; // バッファを追加して不完全なデータを蓄積
 
           try {
             while (true) {
@@ -411,15 +412,25 @@ export class OpenAIResponsesTransformer implements Transformer {
               if (done) break;
 
               const chunk = decoder.decode(value, { stream: true });
-              const lines = chunk.split("\n");
+              buffer += chunk; // バッファに追加
+              const lines = buffer.split("\n");
+
+              // 最後の行は不完全な可能性があるので、バッファに残す
+              buffer = lines.pop() || "";
 
               for (const line of lines) {
                 if (
                   line.startsWith("data: ") &&
                   line.trim() !== "data: [DONE]"
                 ) {
+                  const jsonStr = line.slice(6).trim();
+                  if (jsonStr === "") {
+                    // 空のdata行をスキップ
+                    continue;
+                  }
+
                   try {
-                    const eventData = JSON.parse(line.slice(6));
+                    const eventData = JSON.parse(jsonStr);
 
                     switch (eventData.type) {
                       case "response.created":
@@ -627,9 +638,18 @@ export class OpenAIResponsesTransformer implements Transformer {
                     }
                   } catch (e) {
                     log("Error parsing Responses API event:", e);
+                    log("Problematic line:", line);
+                    log("JSON string:", jsonStr);
+                    // JSONパースエラーの場合、この行をスキップして続行
+                    continue;
                   }
                 }
               }
+            }
+
+            // 処理完了時に残りのバッファをチェック
+            if (buffer.trim() !== "") {
+              log("Remaining buffer at end:", buffer);
             }
           } catch (error) {
             controller.error(error);
