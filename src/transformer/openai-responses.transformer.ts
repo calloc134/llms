@@ -111,7 +111,6 @@ export class OpenAIResponsesTransformer implements Transformer {
 
             inputItems.push({
               type: "function_call",
-              id: newCallId,
               call_id: newCallId,
               name: toolCall.function.name,
               arguments: toolCall.function.arguments,
@@ -182,6 +181,11 @@ export class OpenAIResponsesTransformer implements Transformer {
       }
     }
 
+    // Debug: log input order and call_id consistency
+    console.log(
+      "OpenAI Responses request input:",
+      JSON.stringify(body.input, null, 2)
+    );
     return {
       body,
       config: {
