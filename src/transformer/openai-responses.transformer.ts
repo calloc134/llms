@@ -11,6 +11,11 @@ import { Transformer } from "../types/transformer";
 function sanitizeFormatsRecursively(schema: any) {
   if (!schema || typeof schema !== "object") return;
 
+  // ← ここで root も含め全レベルで format: "uri" を除去
+  if (schema.format === "uri") {
+    delete schema.format;
+  }
+
   // properties があれば各プロパティをチェック
   if (schema.properties && typeof schema.properties === "object") {
     for (const key of Object.keys(schema.properties)) {
@@ -381,7 +386,6 @@ export class OpenAIResponsesTransformer implements Transformer {
         headers: response.headers,
       });
     } else if (response.headers.get("Content-Type")?.includes("stream")) {
-      // Handle streaming response
       if (!response.body) {
         return response;
       }
@@ -389,14 +393,13 @@ export class OpenAIResponsesTransformer implements Transformer {
       const decoder = new TextDecoder();
       const encoder = new TextEncoder();
 
-      // State for tracking the current message being built
+      // State tracking
       let currentContent = "";
       let currentToolCalls: Map<string, any> = new Map();
-      let outputIndex = 0;
-      let contentIndex = 0;
       let responseId = "";
       let model = "";
       let isFirstChunk = true;
+      let choiceIndex = 0; // ← 追加: choice indexの管理
 
       const stream = new ReadableStream({
         async start(controller) {
@@ -418,13 +421,11 @@ export class OpenAIResponsesTransformer implements Transformer {
                   try {
                     const eventData = JSON.parse(line.slice(6));
 
-                    // Process different event types
                     switch (eventData.type) {
                       case "response.created":
                         responseId = eventData.response.id;
                         model = eventData.response.model;
 
-                        // Send initial chunk
                         const initialChunk = {
                           id: responseId,
                           object: "chat.completion.chunk",
@@ -443,21 +444,11 @@ export class OpenAIResponsesTransformer implements Transformer {
                             `data: ${JSON.stringify(initialChunk)}\n\n`
                           )
                         );
-                        isFirstChunk = false;
-                        break;
-
-                      case "response.output_item.added":
-                        outputIndex = eventData.output_index;
-                        break;
-
-                      case "response.content_part.added":
-                        contentIndex = eventData.content_index;
                         break;
 
                       case "response.output_text.delta":
                       case "response.text.delta":
                         if (eventData.delta) {
-                          currentContent += eventData.delta;
                           const deltaChunk = {
                             id: responseId,
                             object: "chat.completion.chunk",
@@ -465,7 +456,7 @@ export class OpenAIResponsesTransformer implements Transformer {
                             model: model,
                             choices: [
                               {
-                                index: 0,
+                                index: choiceIndex,
                                 delta: { content: eventData.delta },
                                 finish_reason: null,
                               },
@@ -485,6 +476,11 @@ export class OpenAIResponsesTransformer implements Transformer {
                             eventData.item_id
                           );
                           if (!toolCall) {
+                            // Tool callが開始されたら次のchoice indexに移る
+                            if (currentContent) {
+                              choiceIndex++;
+                            }
+
                             toolCall = {
                               id: eventData.item_id,
                               type: "function",
@@ -495,7 +491,7 @@ export class OpenAIResponsesTransformer implements Transformer {
                             };
                             currentToolCalls.set(eventData.item_id, toolCall);
 
-                            // Send initial tool call chunk
+                            const toolCallIndex = currentToolCalls.size - 1;
                             const toolCallChunk = {
                               id: responseId,
                               object: "chat.completion.chunk",
@@ -503,14 +499,14 @@ export class OpenAIResponsesTransformer implements Transformer {
                               model: model,
                               choices: [
                                 {
-                                  index: currentToolCalls.size - 1,
+                                  index: choiceIndex,
                                   delta: {
                                     tool_calls: [
                                       {
-                                        index: currentToolCalls.size - 1,
+                                        index: toolCallIndex,
                                         id: eventData.item_id,
                                         type: "function",
-                                        function: {},
+                                        function: { name: "", arguments: "" },
                                       },
                                     ],
                                   },
@@ -527,7 +523,9 @@ export class OpenAIResponsesTransformer implements Transformer {
 
                           toolCall.function.arguments += eventData.delta;
 
-                          // Send arguments delta
+                          const toolCallIndex = Array.from(
+                            currentToolCalls.keys()
+                          ).indexOf(eventData.item_id);
                           const argsDeltaChunk = {
                             id: responseId,
                             object: "chat.completion.chunk",
@@ -535,13 +533,11 @@ export class OpenAIResponsesTransformer implements Transformer {
                             model: model,
                             choices: [
                               {
-                                index: 0,
+                                index: choiceIndex,
                                 delta: {
                                   tool_calls: [
                                     {
-                                      index: Array.from(
-                                        currentToolCalls.keys()
-                                      ).indexOf(eventData.item_id),
+                                      index: toolCallIndex,
                                       function: {
                                         arguments: eventData.delta,
                                       },
@@ -561,18 +557,49 @@ export class OpenAIResponsesTransformer implements Transformer {
                         break;
 
                       case "response.function_call_arguments.done":
-                        if (eventData.item_id) {
+                        if (eventData.item_id && eventData.name) {
                           const toolCall = currentToolCalls.get(
                             eventData.item_id
                           );
-                          if (toolCall && eventData.name) {
+                          if (toolCall) {
                             toolCall.function.name = eventData.name;
+
+                            // Function name deltaを送信
+                            const toolCallIndex = Array.from(
+                              currentToolCalls.keys()
+                            ).indexOf(eventData.item_id);
+                            const nameDeltaChunk = {
+                              id: responseId,
+                              object: "chat.completion.chunk",
+                              created: Math.floor(Date.now() / 1000),
+                              model: model,
+                              choices: [
+                                {
+                                  index: choiceIndex,
+                                  delta: {
+                                    tool_calls: [
+                                      {
+                                        index: toolCallIndex,
+                                        function: {
+                                          name: eventData.name,
+                                        },
+                                      },
+                                    ],
+                                  },
+                                  finish_reason: null,
+                                },
+                              ],
+                            };
+                            controller.enqueue(
+                              encoder.encode(
+                                `data: ${JSON.stringify(nameDeltaChunk)}\n\n`
+                              )
+                            );
                           }
                         }
                         break;
 
                       case "response.completed":
-                        // Send final chunk with finish reason
                         const finalChunk = {
                           id: responseId,
                           object: "chat.completion.chunk",
@@ -580,7 +607,7 @@ export class OpenAIResponsesTransformer implements Transformer {
                           model: model,
                           choices: [
                             {
-                              index: 0,
+                              index: choiceIndex,
                               delta: {},
                               finish_reason:
                                 currentToolCalls.size > 0
@@ -594,14 +621,13 @@ export class OpenAIResponsesTransformer implements Transformer {
                             `data: ${JSON.stringify(finalChunk)}\n\n`
                           )
                         );
+                        // [DONE]は最後に送信
                         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                        break;
+                        return; // ← ここで処理終了
                     }
                   } catch (e) {
                     log("Error parsing Responses API event:", e);
                   }
-                } else if (line.trim() === "data: [DONE]") {
-                  controller.enqueue(encoder.encode("data: [DONE]\n\n"));
                 }
               }
             }
