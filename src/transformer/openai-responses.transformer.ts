@@ -4,14 +4,14 @@ import { log } from "@/utils/log";
 
 export class OpenAIResponsesTransformer implements Transformer {
   name = "OpenAIResponses";
-  endPoint = "/v1beta/responses";
+  endPoint = "/v1/responses";
 
   // Transform unified request to OpenAI Responses API format
   transformRequestOut(request: Record<string, any>): UnifiedChatRequest {
     log("OpenAI Responses Request:", JSON.stringify(request, null, 2));
 
     const messages: UnifiedMessage[] = [];
-    
+
     // Handle instructions (system message)
     if (request.instructions) {
       messages.push({
@@ -38,14 +38,16 @@ export class OpenAIResponsesTransformer implements Transformer {
             messages.push({
               role: "assistant",
               content: null,
-              tool_calls: [{
-                id: item.call_id,
-                type: "function",
-                function: {
-                  name: item.name,
-                  arguments: item.arguments,
+              tool_calls: [
+                {
+                  id: item.call_id,
+                  type: "function",
+                  function: {
+                    name: item.name,
+                    arguments: item.arguments,
+                  },
                 },
-              }],
+              ],
             });
           } else if (item.type === "function_call_output") {
             messages.push({
@@ -64,9 +66,16 @@ export class OpenAIResponsesTransformer implements Transformer {
       max_tokens: request.max_output_tokens,
       temperature: request.temperature,
       stream: request.stream,
-      tools: request.tools ? this.convertToolsToUnified(request.tools) : undefined,
+      tools: request.tools
+        ? this.convertToolsToUnified(request.tools)
+        : undefined,
       tool_choice: this.convertToolChoice(request.tool_choice),
     };
+
+    log(
+      "Transformed OpenAI Responses Request hogehoge:",
+      JSON.stringify(result, null, 2)
+    );
 
     return result;
   }
@@ -125,7 +134,7 @@ export class OpenAIResponsesTransformer implements Transformer {
 
   private convertToolsToUnified(tools: any[]): UnifiedTool[] {
     return tools
-      .filter(tool => tool.type === "function")
+      .filter((tool) => tool.type === "function")
       .map((tool) => ({
         type: "function",
         function: {
@@ -156,7 +165,7 @@ export class OpenAIResponsesTransformer implements Transformer {
         const encoder = new TextEncoder();
         const decoder = new TextDecoder();
         let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-        
+
         // State tracking
         let currentMessage: any = null;
         let currentToolCalls: Map<string, any> = new Map();
@@ -173,11 +182,13 @@ export class OpenAIResponsesTransformer implements Transformer {
             object: "chat.completion.chunk",
             created: Math.floor(Date.now() / 1000),
             model: model || "gpt-4",
-            choices: [{
-              index: 0,
-              delta,
-              finish_reason: finishReason || null,
-            }],
+            choices: [
+              {
+                index: 0,
+                delta,
+                finish_reason: finishReason || null,
+              },
+            ],
           };
         };
 
@@ -204,7 +215,7 @@ export class OpenAIResponsesTransformer implements Transformer {
 
               if (!line.startsWith("data: ")) continue;
               const data = line.slice(6);
-              
+
               try {
                 const event = JSON.parse(data);
                 log("Responses API Event:", event.type, event);
@@ -216,7 +227,10 @@ export class OpenAIResponsesTransformer implements Transformer {
                     if (!hasStarted) {
                       hasStarted = true;
                       // Send initial chunk
-                      const chunk = createChunk({ role: "assistant", content: "" });
+                      const chunk = createChunk({
+                        role: "assistant",
+                        content: "",
+                      });
                       controller.enqueue(
                         encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
                       );
@@ -258,21 +272,27 @@ export class OpenAIResponsesTransformer implements Transformer {
                   case "response.function_call_arguments.delta":
                     // Function arguments delta
                     if (event.delta && event.item_id) {
-                      const existingArgs = accumulatedToolArgs.get(event.item_id) || "";
-                      accumulatedToolArgs.set(event.item_id, existingArgs + event.delta);
-                      
+                      const existingArgs =
+                        accumulatedToolArgs.get(event.item_id) || "";
+                      accumulatedToolArgs.set(
+                        event.item_id,
+                        existingArgs + event.delta
+                      );
+
                       const toolCall = currentToolCalls.get(event.item_id);
                       if (toolCall) {
                         const chunk = createChunk({
-                          tool_calls: [{
-                            index: 0,
-                            id: toolCall.id,
-                            type: "function",
-                            function: {
-                              name: toolCall.function.name,
-                              arguments: event.delta,
+                          tool_calls: [
+                            {
+                              index: 0,
+                              id: toolCall.id,
+                              type: "function",
+                              function: {
+                                name: toolCall.function.name,
+                                arguments: event.delta,
+                              },
                             },
-                          }],
+                          ],
                         });
                         controller.enqueue(
                           encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
@@ -360,7 +380,10 @@ export class OpenAIResponsesTransformer implements Transformer {
 
   // Convert non-streaming response
   private convertResponsesToUnified(responsesData: any): any {
-    log("Original Responses API response:", JSON.stringify(responsesData, null, 2));
+    log(
+      "Original Responses API response:",
+      JSON.stringify(responsesData, null, 2)
+    );
 
     const messages: any[] = [];
     let content = "";
@@ -403,20 +426,24 @@ export class OpenAIResponsesTransformer implements Transformer {
       object: "chat.completion",
       created: responsesData.created_at || Math.floor(Date.now() / 1000),
       model: responsesData.model,
-      choices: [{
-        index: 0,
-        message: {
-          role: "assistant",
-          content: content || null,
-          ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: content || null,
+            ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
+          },
+          finish_reason: this.mapFinishReason(responsesData.status),
         },
-        finish_reason: this.mapFinishReason(responsesData.status),
-      }],
-      usage: responsesData.usage ? {
-        prompt_tokens: responsesData.usage.input_tokens || 0,
-        completion_tokens: responsesData.usage.output_tokens || 0,
-        total_tokens: responsesData.usage.total_tokens || 0,
-      } : undefined,
+      ],
+      usage: responsesData.usage
+        ? {
+            prompt_tokens: responsesData.usage.input_tokens || 0,
+            completion_tokens: responsesData.usage.output_tokens || 0,
+            total_tokens: responsesData.usage.total_tokens || 0,
+          }
+        : undefined,
     };
 
     log("Converted to unified format:", JSON.stringify(result, null, 2));
