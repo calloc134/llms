@@ -7,6 +7,53 @@ import {
 } from "@/types/llm";
 import { Transformer } from "../types/transformer";
 
+// transformRequestIn の冒頭か別関数として定義
+function sanitizeFormatsRecursively(schema: any) {
+  if (!schema || typeof schema !== "object") return;
+
+  // properties があれば各プロパティをチェック
+  if (schema.properties && typeof schema.properties === "object") {
+    for (const key of Object.keys(schema.properties)) {
+      const prop = schema.properties[key];
+      // 'uri' フォーマットを削除
+      if (prop.format === "uri") {
+        delete prop.format;
+      }
+      // 再帰処理
+      sanitizeFormatsRecursively(prop);
+    }
+  }
+
+  // array の items に対しても再帰
+  if (schema.type === "array" && schema.items) {
+    sanitizeFormatsRecursively(schema.items);
+  }
+}
+
+// transformRequestIn の冒頭か別関数として定義
+function fillRequiredRecursively(schema: any) {
+  if (!schema || typeof schema !== "object") return;
+
+  // properties を持つ object スキーマには必ず required を補完
+  if (schema.properties && typeof schema.properties === "object") {
+    const keys = Object.keys(schema.properties);
+    if (!Array.isArray(schema.required)) {
+      schema.required = [...keys];
+    } else {
+      // 重複を避けつつマージ
+      const missing = keys.filter((k) => !schema.required.includes(k));
+      schema.required.push(...missing);
+    }
+    // ネストされた各 property を再帰
+    keys.forEach((k) => fillRequiredRecursively(schema.properties[k]));
+  }
+
+  // array の items に対しても同様
+  if (schema.type === "array" && schema.items) {
+    fillRequiredRecursively(schema.items);
+  }
+}
+
 export class OpenAIResponsesTransformer implements Transformer {
   name = "OpenAIResponses";
 
@@ -79,30 +126,17 @@ export class OpenAIResponsesTransformer implements Transformer {
       body.max_output_tokens = request.max_tokens;
     }
 
-    // Handle tools
+    // transformRequestIn 内の tools マッピング部
     if (request.tools && request.tools.length > 0) {
       body.tools = request.tools.map((tool) => {
-        const parameters = tool.function.parameters;
-
-        // すべてのプロパティキーを required に含める
-        if (parameters && parameters.properties) {
-          const allPropertyKeys = Object.keys(parameters.properties);
-          if (!parameters.required) {
-            parameters.required = allPropertyKeys;
-          } else {
-            // 既存の required 配列に不足しているキーを追加
-            const missingKeys = allPropertyKeys.filter(
-              (key) => !parameters.required.includes(key)
-            );
-            parameters.required = [...parameters.required, ...missingKeys];
-          }
-        }
-
+        const params = tool.function.parameters;
+        sanitizeFormatsRecursively(params);
+        fillRequiredRecursively(params);
         return {
           type: "function",
           name: tool.function.name,
           description: tool.function.description,
-          parameters: parameters,
+          parameters: params,
           strict: true,
         };
       });
