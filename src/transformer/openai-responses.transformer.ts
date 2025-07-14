@@ -72,9 +72,9 @@ export class OpenAIResponsesTransformer implements Transformer {
     };
 
     // Add optional parameters
-    if (request.temperature !== undefined) {
-      body.temperature = request.temperature;
-    }
+    // if (request.temperature !== undefined) {
+    //   body.temperature = request.temperature;
+    // }
     if (request.max_tokens !== undefined) {
       body.max_output_tokens = request.max_tokens;
     }
@@ -190,9 +190,9 @@ export class OpenAIResponsesTransformer implements Transformer {
       stream: request.stream,
     };
 
-    if (request.temperature !== undefined) {
-      result.temperature = request.temperature;
-    }
+    // if (request.temperature !== undefined) {
+    //   result.temperature = request.temperature;
+    // }
     if (request.max_output_tokens !== undefined) {
       result.max_tokens = request.max_output_tokens;
     }
