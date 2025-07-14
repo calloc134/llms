@@ -3,6 +3,7 @@ import { GeminiTransformer } from "./gemini.transformer";
 import { DeepseekTransformer } from "./deepseek.transformer";
 import { TooluseTransformer } from "./tooluse.transformer";
 import { OpenrouterTransformer } from "./openrouter.transformer";
+import { OpenAIResponsesTransformer } from "./openai-responses.transformer";
 
 export {
   AnthropicTransformer,
@@ -10,4 +11,5 @@ export {
   DeepseekTransformer,
   TooluseTransformer,
   OpenrouterTransformer,
+  OpenAIResponsesTransformer,
 };

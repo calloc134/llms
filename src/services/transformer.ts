@@ -7,6 +7,7 @@ import {
   DeepseekTransformer,
   TooluseTransformer,
   OpenrouterTransformer,
+  OpenAIResponsesTransformer,
 } from "@/transformer";
 
 interface TransformerConfig {
@@ -115,11 +116,13 @@ export class TransformerService {
 
   private async registerDefaultTransformersInternal(): Promise<void> {
     try {
+      const openAIResponses = new OpenAIResponsesTransformer();
       const anthropic = new AnthropicTransformer();
       const gemini = new GeminiTransformer();
       const deepseek = new DeepseekTransformer();
       const tooluse = new TooluseTransformer();
       const openrouter = new OpenrouterTransformer();
+      this.registerTransformer(openAIResponses.name, openAIResponses);
       this.registerTransformer(anthropic.name, anthropic);
       this.registerTransformer(gemini.name, gemini);
       this.registerTransformer(deepseek.name, deepseek);
