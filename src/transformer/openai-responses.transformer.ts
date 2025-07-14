@@ -64,10 +64,16 @@ export class OpenAIResponsesTransformer implements Transformer {
 
   endPoint = "/v1/responses";
 
+  // Tool call IDマッピングを保持
+  private toolCallIdMap = new Map<string, string>();
+
   transformRequestIn(
     request: UnifiedChatRequest,
     provider: LLMProvider
   ): Record<string, any> {
+    // 新しいリクエストではマッピングをクリア
+    this.toolCallIdMap.clear();
+
     // Convert UnifiedChatRequest to OpenAI Responses API format
     const inputItems: any[] = [];
 
@@ -94,20 +100,29 @@ export class OpenAIResponsesTransformer implements Transformer {
         // Handle tool calls
         if (message.tool_calls && message.tool_calls.length > 0) {
           message.tool_calls.forEach((toolCall) => {
+            // 新しいIDを生成してマッピングを保存
+            const newCallId = `call_${Math.random()
+              .toString(36)
+              .substring(2, 15)}`;
+            this.toolCallIdMap.set(toolCall.id, newCallId);
+
             inputItems.push({
               type: "function_call",
-              id: toolCall.id,
-              call_id: toolCall.id,
+              id: newCallId,
+              call_id: newCallId,
               name: toolCall.function.name,
               arguments: toolCall.function.arguments,
             });
           });
         }
       } else if (message.role === "tool") {
-        // Tool results
+        // Tool results - マッピングされたIDを使用
+        const mappedCallId =
+          this.toolCallIdMap.get(message.tool_call_id!) ||
+          message.tool_call_id!;
         inputItems.push({
           type: "function_call_output",
-          call_id: message.tool_call_id,
+          call_id: mappedCallId,
           output:
             typeof message.content === "string"
               ? message.content
@@ -223,8 +238,16 @@ export class OpenAIResponsesTransformer implements Transformer {
             lastAssistant.tool_calls = [];
           }
 
+          // 元のIDに戻すためのリバースマッピング
+          const originalId =
+            Array.from(this.toolCallIdMap.entries()).find(
+              ([, mappedId]) => mappedId === (item.id || item.call_id)
+            )?.[0] ||
+            item.id ||
+            item.call_id;
+
           lastAssistant.tool_calls.push({
-            id: item.id || item.call_id,
+            id: originalId,
             type: "function",
             function: {
               name: item.name,
@@ -232,10 +255,16 @@ export class OpenAIResponsesTransformer implements Transformer {
             },
           });
         } else if (item.type === "function_call_output") {
+          // 元のIDに戻すためのリバースマッピング
+          const originalId =
+            Array.from(this.toolCallIdMap.entries()).find(
+              ([, mappedId]) => mappedId === item.call_id
+            )?.[0] || item.call_id;
+
           messages.push({
             role: "tool",
             content: item.output,
-            tool_call_id: item.call_id,
+            tool_call_id: originalId,
           });
         }
       });
@@ -340,7 +369,12 @@ export class OpenAIResponsesTransformer implements Transformer {
             }
           } else if (item.type === "function_call") {
             toolCalls.push({
-              id: item.id || item.call_id,
+              id:
+                Array.from(this.toolCallIdMap.entries()).find(
+                  ([, mappedId]) => mappedId === (item.id || item.call_id)
+                )?.[0] ||
+                item.id ||
+                item.call_id,
               type: "function",
               function: {
                 name: item.name,
@@ -400,6 +434,9 @@ export class OpenAIResponsesTransformer implements Transformer {
       let model = "";
       let isFirstChunk = true;
       let choiceIndex = 0; // ← 追加: choice indexの管理
+
+      // IDマッピングをコピー
+      const toolCallIdMap = new Map(this.toolCallIdMap);
 
       const stream = new ReadableStream({
         async start(controller) {
@@ -483,9 +520,13 @@ export class OpenAIResponsesTransformer implements Transformer {
 
                       case "response.function_call_arguments.delta":
                         if (eventData.item_id && eventData.delta) {
-                          let toolCall = currentToolCalls.get(
-                            eventData.item_id
-                          );
+                          // 元のIDにリバースマッピング
+                          const originalId =
+                            Array.from(toolCallIdMap.entries()).find(
+                              ([, mappedId]) => mappedId === eventData.item_id
+                            )?.[0] || eventData.item_id;
+
+                          let toolCall = currentToolCalls.get(originalId);
                           if (!toolCall) {
                             // Tool callが開始されたら次のchoice indexに移る
                             if (currentContent) {
@@ -493,14 +534,14 @@ export class OpenAIResponsesTransformer implements Transformer {
                             }
 
                             toolCall = {
-                              id: eventData.item_id,
+                              id: originalId,
                               type: "function",
                               function: {
                                 name: "",
                                 arguments: "",
                               },
                             };
-                            currentToolCalls.set(eventData.item_id, toolCall);
+                            currentToolCalls.set(originalId, toolCall);
 
                             const toolCallIndex = currentToolCalls.size - 1;
                             const toolCallChunk = {
@@ -515,7 +556,7 @@ export class OpenAIResponsesTransformer implements Transformer {
                                     tool_calls: [
                                       {
                                         index: toolCallIndex,
-                                        id: eventData.item_id,
+                                        id: originalId,
                                         type: "function",
                                         function: { name: "", arguments: "" },
                                       },
@@ -536,7 +577,7 @@ export class OpenAIResponsesTransformer implements Transformer {
 
                           const toolCallIndex = Array.from(
                             currentToolCalls.keys()
-                          ).indexOf(eventData.item_id);
+                          ).indexOf(originalId);
                           const argsDeltaChunk = {
                             id: responseId,
                             object: "chat.completion.chunk",
@@ -569,16 +610,20 @@ export class OpenAIResponsesTransformer implements Transformer {
 
                       case "response.function_call_arguments.done":
                         if (eventData.item_id && eventData.name) {
-                          const toolCall = currentToolCalls.get(
-                            eventData.item_id
-                          );
+                          // 元のIDにリバースマッピング
+                          const originalId =
+                            Array.from(toolCallIdMap.entries()).find(
+                              ([, mappedId]) => mappedId === eventData.item_id
+                            )?.[0] || eventData.item_id;
+
+                          const toolCall = currentToolCalls.get(originalId);
                           if (toolCall) {
                             toolCall.function.name = eventData.name;
 
                             // Function name deltaを送信
                             const toolCallIndex = Array.from(
                               currentToolCalls.keys()
-                            ).indexOf(eventData.item_id);
+                            ).indexOf(originalId);
                             const nameDeltaChunk = {
                               id: responseId,
                               object: "chat.completion.chunk",
